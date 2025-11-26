@@ -1,0 +1,5 @@
+"VertexLitGeneric"
+{
+    "$basetexture" "models/dubz_props/dubz_printer_2"
+    "$surfaceprop" "metal"
+}
