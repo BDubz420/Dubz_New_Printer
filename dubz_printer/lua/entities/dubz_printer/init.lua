@@ -262,16 +262,26 @@ net.Receive("dubz_printer_refill", function()
     local ent = net.ReadEntity()
 
     if IsValid(ent) and ent:GetClass() == "dubz_printer" then
-        local CoolantRefillCost = dubz.printer[ent:GetClass()].CoolantRefillCost
+        local baseRefillCost = dubz.printer[ent:GetClass()].CoolantRefillCost
         local levelConfig = GetLevelConfig(ent)
+        local currentCoolant = math.min(ent.Coolant or levelConfig.maxCoolant, levelConfig.maxCoolant)
 
-        if ply:getDarkRPVar("money") >= CoolantRefillCost then
-            local wasEmpty = (ent.Coolant or 0) == 0
+        if currentCoolant >= levelConfig.maxCoolant then
+            DarkRP.notify(ply, 0, 4, "Coolant is already full.")
+            return
+        end
+
+        local missingFraction = (levelConfig.maxCoolant - currentCoolant) / levelConfig.maxCoolant
+        local refillCost = math.ceil(baseRefillCost * missingFraction)
+
+        if ply:getDarkRPVar("money") >= refillCost then
+            local wasEmpty = currentCoolant == 0
 
             ent.MaxCoolant = levelConfig.maxCoolant
             ent.Coolant = levelConfig.maxCoolant
-            ply:addMoney(-CoolantRefillCost)
-            DarkRP.notify(ply, 0, 4, "Coolant refilled for " .. DarkRP.formatMoney(CoolantRefillCost) .. ".")
+            ent:SetNWInt("Coolant", ent.Coolant)
+            ply:addMoney(-refillCost)
+            DarkRP.notify(ply, 0, 4, "Coolant refilled for " .. DarkRP.formatMoney(refillCost) .. ".")
 
             -- Start sound if it was empty before refill
             if wasEmpty then
