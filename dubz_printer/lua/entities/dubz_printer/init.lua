@@ -9,6 +9,31 @@ util.AddNetworkString("dubz_printer_upgrade")
 
 ENT.SpawnOffset = Vector(15, 0, 15)
 
+local function GetLevelConfig(ent)
+    local cfg = dubz.printer[ent:GetClass()]
+    local stars = ent:GetNWInt("Stars", 0)
+
+    local amountMultiplier = 1 + stars * (cfg.AmountBonusPerStar or cfg.UpgradeBonus or 0)
+    local speedMultiplier = math.Clamp(1 - stars * (cfg.SpeedBonusPerStar or cfg.UpgradeBonus or 0), 0.4, 1)
+    local maxCoolant = (cfg.MaxCoolant or 100) * (1 + stars * (cfg.CoolantCapacityPerStar or 0))
+    local coolantPerPrint = (cfg.CoolantPerPrint or 0) * math.max(0.25, 1 - stars * (cfg.CoolantEfficiencyPerStar or 0))
+    local passiveDrain = (cfg.PassiveCoolantDrain or 0.1) * (1 + stars * 0.05)
+
+    return {
+        amountMultiplier = amountMultiplier,
+        speedMultiplier = speedMultiplier,
+        maxCoolant = maxCoolant,
+        coolantPerPrint = coolantPerPrint,
+        passiveDrain = passiveDrain
+    }
+end
+
+local function GetUpgradeCost(cfg, level)
+    local base = cfg.UpgradeCostBase or cfg.UpgradeCost or 0
+    local scale = cfg.UpgradeCostScale or 1
+    return math.floor(base * (scale ^ (level - 1)))
+end
+
 local function PrintMore(ent)
     if not IsValid(ent) then return end
     ent.sparking = true
@@ -23,9 +48,8 @@ function ENT:CreateMoneybag()
     if self:GetNWInt("Coolant") == 0 then return end
 
     local baseAmount = dubz.printer[self:GetClass()].PrintAmount
-    local stars = self:GetNWInt("Stars", 0)
-    local amountMultiplier = 1 + (stars * dubz.printer["dubz_printer"].UpgradeBonus) -- 10% more per star
-    local amount = math.Round(baseAmount * amountMultiplier)
+    local levelConfig = GetLevelConfig(self)
+    local amount = math.Round(baseAmount * levelConfig.amountMultiplier)
 
     local prevent, hookAmount = hook.Run("moneyPrinterPrintMoney", self, amount)
     if prevent == true then return end
@@ -34,6 +58,11 @@ function ENT:CreateMoneybag()
     local MoneyPos = self:GetPos() + self.SpawnOffset
     local currentAmount = self:GetNWInt("Amount", 0)
     self:SetNWInt("Amount", currentAmount + amount)
+
+    self.MaxCoolant = levelConfig.maxCoolant
+    local coolantAfterPrint = math.max(0, (self.Coolant or levelConfig.maxCoolant) - levelConfig.coolantPerPrint)
+    self.Coolant = math.min(levelConfig.maxCoolant, coolantAfterPrint)
+    self:SetNWInt("Coolant", self.Coolant)
 
     -- Overheat logic
     if self.OverheatChance and self.OverheatChance > 0 then
@@ -48,8 +77,7 @@ function ENT:CreateMoneybag()
 
     -- Adjusted PrintTime based on stars
     local basePrintTime = dubz.printer[self:GetClass()].PrintTime
-    local timeMultiplier = math.Clamp(1 - (stars * 0.1), 0.5, 1) -- up to 50% faster
-    local nextPrintTime = basePrintTime * timeMultiplier
+    local nextPrintTime = basePrintTime * levelConfig.speedMultiplier
 
     self.PrintTimerID = "DubzPrinterPrint_" .. self:EntIndex()
     timer.Create(self.PrintTimerID, nextPrintTime, 1, function()
@@ -79,7 +107,9 @@ function ENT:Initialize()
 
     local cfg = dubz.printer[self:GetClass()]
     self.damage = cfg.Health or 100
-    self.Coolant = cfg.MaxCoolant or 100
+    local levelConfig = GetLevelConfig(self)
+    self.MaxCoolant = levelConfig.maxCoolant
+    self.Coolant = levelConfig.maxCoolant
 
     self:SetNWInt("Amount", 0)
     self:SetNWInt("Health", self.damage)
@@ -88,10 +118,8 @@ function ENT:Initialize()
     self:SetNWInt("Temperature", cfg.StartingTemp)
     self:SetNWBool("Overheated", false)
 
-    local stars = self:GetNWInt("Stars", 0)
-    local timeMultiplier = math.Clamp(1 - (stars * dubz.printer["dubz_printer"].UpgradeBonus), 0.5, 1)
     local basePrintTime = dubz.printer[self:GetClass()].PrintTime
-    local nextPrintTime = basePrintTime * timeMultiplier
+    local nextPrintTime = basePrintTime * levelConfig.speedMultiplier
 
     timer.Simple(nextPrintTime, function() PrintMore(self) end)
 end
@@ -167,6 +195,9 @@ function ENT:Think()
         return
     end
 
+    local levelConfig = GetLevelConfig(self)
+    self.MaxCoolant = levelConfig.maxCoolant
+
     -- Handle coolant sound start/stop
     local coolant = self.Coolant or 0
 
@@ -189,7 +220,7 @@ function ENT:Think()
     end
 
     -- Coolant consumption
-    self.Coolant = math.max(0, coolant - 0.1)
+    self.Coolant = math.max(0, math.min(levelConfig.maxCoolant, coolant - levelConfig.passiveDrain))
     self:SetNWInt("Coolant", self.Coolant)
 
     local temp = self:GetNWInt("Temperature", 25)
@@ -197,9 +228,9 @@ function ENT:Think()
         temp = math.min(100, temp + 0.5)
     else
         local coolantLevel = self.Coolant or 0
-        if coolantLevel > 50 then
+        if coolantLevel > levelConfig.maxCoolant * 0.5 then
             temp = math.max(0, temp - 0.3)
-        elseif coolantLevel < 20 then
+        elseif coolantLevel < levelConfig.maxCoolant * 0.2 then
             temp = math.min(100, temp + 0.5)
         end
     end
@@ -230,13 +261,15 @@ net.Receive("dubz_printer_refill", function()
     local ply = net.ReadEntity()
     local ent = net.ReadEntity()
 
-    local CoolantRefillCost = dubz.printer[ent:GetClass()].CoolantRefillCost
-
     if IsValid(ent) and ent:GetClass() == "dubz_printer" then
+        local CoolantRefillCost = dubz.printer[ent:GetClass()].CoolantRefillCost
+        local levelConfig = GetLevelConfig(ent)
+
         if ply:getDarkRPVar("money") >= CoolantRefillCost then
             local wasEmpty = (ent.Coolant or 0) == 0
 
-            ent.Coolant = 100
+            ent.MaxCoolant = levelConfig.maxCoolant
+            ent.Coolant = levelConfig.maxCoolant
             ply:addMoney(-CoolantRefillCost)
             DarkRP.notify(ply, 0, 4, "Coolant refilled for " .. DarkRP.formatMoney(CoolantRefillCost) .. ".")
 
@@ -247,9 +280,8 @@ net.Receive("dubz_printer_refill", function()
 
                     -- Restart the print process
                     local stars = ent:GetNWInt("Stars", 0)
-                    local timeMultiplier = math.Clamp(1 - (stars * dubz.printer["dubz_printer"].UpgradeBonus), 0.5, 1)
                     local basePrintTime = dubz.printer[ent:GetClass()].PrintTime
-                    local nextPrintTime = basePrintTime * timeMultiplier
+                    local nextPrintTime = basePrintTime * levelConfig.speedMultiplier
 
                     ent.PrintTimerID = "DubzPrinterTimer_" .. ent:EntIndex()
                     timer.Create(ent.PrintTimerID, nextPrintTime, 1, function()
@@ -272,9 +304,11 @@ net.Receive("dubz_printer_upgrade", function()
     if ent:GetClass() ~= "dubz_printer" then return end
 
     local current = ent:GetNWInt("Stars", 0)
-    local upgradecost = dubz.printer[ent:GetClass()].UpgradeCost
+    local cfg = dubz.printer[ent:GetClass()]
+    local upgradecost = GetUpgradeCost(cfg, current + 1)
+    local maxLevel = cfg.MaxUpgradeLevel or 5
 
-    if current < 5 then
+    if current < maxLevel then
         if ply:getDarkRPVar("money") >= upgradecost then
             ent:SetNWInt("Stars", current + 1)
             ply:addMoney(-upgradecost)
@@ -291,10 +325,13 @@ net.Receive("dubz_printer_upgrade", function()
             end
 
             -- Restart the print process
-            local stars = ent:GetNWInt("Stars", 0)
-            local timeMultiplier = math.Clamp(1 - (stars * dubz.printer["dubz_printer"].UpgradeBonus), 0.5, 1)
+            local levelConfig = GetLevelConfig(ent)
+            ent.MaxCoolant = levelConfig.maxCoolant
+            ent.Coolant = math.min(ent.Coolant or levelConfig.maxCoolant, levelConfig.maxCoolant)
+            ent:SetNWInt("Coolant", ent.Coolant)
+
             local basePrintTime = dubz.printer[ent:GetClass()].PrintTime
-            local nextPrintTime = basePrintTime * timeMultiplier
+            local nextPrintTime = basePrintTime * levelConfig.speedMultiplier
 
             ent.PrintTimerID = "DubzPrinterTimer_" .. ent:EntIndex()
             timer.Create(ent.PrintTimerID, nextPrintTime, 1, function()
